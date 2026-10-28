@@ -1,21 +1,40 @@
 # Carles Pet
 
-A small pixel-art desktop pet: **Carles**, a chibi man with a beard, a moustache and a pink shirt. He and every one of his 36 animations are **drawn in code** from coloured blocks, with no image files. You can view and tune the animations in a browser page.
+A small pixel-art desktop pet: **Carles**, a chibi man with a beard, a moustache and a pink shirt. He and every one of his 36 animations are **drawn in code** from coloured blocks, with no image files. He lives on your Windows taskbar, and you can view and tune his animations in a browser page.
 
-**Status:** the character and animations are done. The desktop app itself is next (see [Roadmap](#roadmap)).
+**Status:** the character, the animations and the Windows desktop pet (with a tray menu) are done. Publishing a release is next (see [Roadmap](#roadmap)).
 
 ---
 
 ## Quick start
 
-Open `index.html` in a browser by double-clicking it. Nothing needs to be installed and there's no build step.
+**Desktop pet (Windows):** with [Python 3](https://www.python.org/) installed (tested with 3.12; only the standard library is used), run
+
+```
+pythonw -I desktop\carles_pet.py
+```
+
+He appears on the taskbar. Right-click him, or click his icon by the clock, for the menu. See [The desktop pet](#the-desktop-pet).
+
+Easier ways to start him:
+- **Desktop shortcut:** run `powershell -ExecutionPolicy Bypass -File desktop\make-shortcut.ps1` once. It puts a "Carles" shortcut with his icon on your desktop. Run it again if you move the folder or reinstall Python.
+- **Double-click** `desktop\start-carles.cmd`.
+- **Every time you log in:** tick "Start with Windows" in his menu.
+
+**Animation Lab:** open `index.html` in a browser by double-clicking it. Nothing needs to be installed and there's no build step.
 
 ```
 carles-pet/
-  index.html     the Animation Lab page for viewing and tuning
-  carles.js      the character, his props and all animations (plain JS, global `Carles`)
+  index.html                 the Animation Lab page for viewing and tuning
+  carles.js                  the character, his props and all animations (plain JS, global `Carles`)
+  tools/bake.html            samples every animation into frames for the desktop pet
+  tools/bake.ps1             runs the bake in headless Edge -> desktop/carles-frames.json
+  desktop/carles-frames.json the baked frames (generated; commit it after re-baking)
+  desktop/carles_pet.py      the desktop pet (Python + tkinter, Windows)
+  desktop/start-carles.cmd   double-click launcher
+  desktop/make-shortcut.ps1  creates a desktop shortcut (and desktop/carles.ico, not tracked)
   README.md
-  LICENSE        CC0 1.0
+  LICENSE                    CC0 1.0
 ```
 
 ## The Animation Lab (`index.html`)
@@ -130,23 +149,72 @@ Headless Edge or Chrome can render the contact sheet to a PNG:
 
 ---
 
-## Roadmap
+## The desktop pet
 
-### Next: the desktop pet
-A transparent, frameless, always-on-top window where Carles stands on the taskbar. It's click-through except on him.
+A frameless, always-on-top window just big enough for Carles, standing on the taskbar of the main screen. Clicks pass through the empty space around him. He has no taskbar button, doesn't appear in Alt+Tab, and clicking him doesn't take focus from your window. Only one copy runs at a time.
 
-Planned behaviour:
+### What he does
 
 | Situation | Behaviour |
 |---|---|
-| Idle | Random pick of idle, walk, build, groove, read, dance, think, sweep or carry. Never the same one twice in a row |
-| Walking | Toward a random spot, facing the way he walks and turning at screen edges |
-| 60 s with no mouse activity | stretch → yawn → nap. Moving the mouse plays wake |
-| Click | 1 click → hop, double-click → doubleJump, 4 fast clicks → annoyed, hover → love |
-| Drag | dangle while held, then fall → land when released |
-| Screen edge | peek |
+| On his own | Picks idle, walk, build, groove, read, dance, think, sweep or carry for 5–10 s. Never the same one twice in a row |
+| Walking | To a random spot at about 50 px/s, facing the way he walks. About 1 walk in 5, he walks off a screen edge, peeks back in and waves, then walks back on |
+| 60 s without mouse or keyboard input | stretch → yawn → nap. Any input plays wake |
+| Clicks | 1 click → hop, 2 → doubleJump, 4 fast clicks → annoyed. A single click starts about 0.3 s later, while he waits to see if a second one follows |
+| Pointer resting on him (about 2 s) | love, until the pointer moves away |
+| Drag | dangle from the pointer while held, then he falls to the taskbar and lands (fall → land) |
+| Full-screen app, game or presentation in front | He hides and stops completely, and comes back afterwards |
+| Windows dark mode | Symbols (z, !) switch to a light colour |
 
-Technology is still open. Electron would reuse `carles.js` unchanged, and Python + PySide6 is the other option.
+His own activity changes wait for the end of an animation cycle, so he's always back on `BASE`. Reactions to you (clicks, drag, hover, waking) start straight away.
+
+### The menu
+Right-click him, or click his icon in the notification area (it may be under the `^` at first):
+
+| Item | What it does |
+|---|---|
+| Size | 1× (about 88 px tall at 100 % display scaling), 2× or 3× |
+| Shirt colour | Pink, red, orange, yellow, green, teal, blue, purple or grey. The tray icon follows |
+| Pause | He stands still and ignores clicks until you untick it |
+| Start with Windows | Adds or removes him in your user's startup list (`HKCU\Software\Microsoft\Windows\CurrentVersion\Run`, value `CarlesPet`). It's also listed in Task Manager → Startup apps |
+| Quit | Closes him |
+
+Size and shirt colour are remembered in `%APPDATA%\CarlesPet\settings.json`. Delete that file to go back to the defaults.
+
+**Testing options:** `pythonw -I desktop\carles_pet.py nap` limits him to one animation, and `--sleep-after 10` makes him nap after 10 s instead of 60. `python -I desktop\carles_pet.py --save-icon carles.ico` writes his icon file.
+
+**Resource use** (measured on Windows 11): about 0.1 % CPU and 15 MB of memory. He only redraws when a frame changes and sleeps in between.
+
+### How it works: bake, then play
+`carles.js` stays the single source of truth, and the desktop pet never runs JavaScript:
+
+1. **Bake.** `tools/bake.html` loads `carles.js` and samples every animation at its keyframes, plus every 66 ms for continuous effects (z's, hearts, confetti). Each frame is painted onto a unit grid exactly as `draw()` paints it (including peek's screen-edge clip), packed back into rectangles, and stored for both facings. Facing left isn't a plain mirror, because symbols like z and ! must stay readable. Identical consecutive frames are merged into one frame with a longer duration.
+2. **Play.** `desktop/carles_pet.py` reads `desktop/carles-frames.json` and draws the rectangles on a tkinter canvas at the chosen scale.
+
+**After changing `carles.js`, re-bake:**
+
+```powershell
+powershell -ExecutionPolicy Bypass -File tools\bake.ps1
+```
+
+This needs Microsoft Edge (or change the path in the script to Chrome). To check the bake, open `tools/bake.html?view=1&unit=3` (add `&only=nap,peek` to limit it). It shows every baked frame above the live `draw()` of the same moment. The first line counts the frames whose pixels differ, which should be 0. The lab's grey peek edge is ignored, because on the desktop the real screen edge does that job.
+
+**The frame file** (`carles-frames.json`):
+- `keys` and `colors` are the palette: letter → `#RRGGBB`, plus `_shadow` (`#RRGGBBAA`).
+- `anims` is a list of `{ id, name, group, loop, travel, dur, frames }`.
+- Each frame is `{ t, d, R, L }`: start time and duration in ms, then flat rectangle lists `[x, y, w, h, colourIndex, ...]` facing right (`R`) and left (`L`).
+- Units are character pixels with `y` up and `y = 0` as the ground. The shadow row is `y = -1`.
+- Peek frames also have `eR`/`eL`: `[x, side]` of the screen edge that clips him.
+
+**Desktop limitations:**
+- The window uses one see-through colour (tkinter's `-transparentcolor`), so the soft ground shadow is left out.
+- Main screen only.
+- If the taskbar moves while he runs, restart him.
+
+## Roadmap
+
+- **Next:** a GitHub release with a short "how to install" for people who aren't developers.
+- **Ideas:** a custom shirt colour picker, more than one screen, and small visual fixes (for example, the cursor drawn while he dangles is hard to see on dark backgrounds).
 
 ---
 

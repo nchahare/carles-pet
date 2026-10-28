@@ -1,0 +1,185 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Carles bake</title>
+<style>
+  body { font: 13px system-ui, sans-serif; margin: 16px; background: #f4f1ec; color: #2a2622; }
+  h2 { font-size: 13px; margin: 14px 0 4px; }
+  .strip { display: flex; flex-wrap: wrap; gap: 6px; }
+  .cell { background: #fff; border: 1px solid #ddd; text-align: center; font-size: 10px; }
+  canvas { display: block; image-rendering: pixelated; }
+  pre { white-space: pre-wrap; word-break: break-all; }
+</style>
+</head>
+<body>
+<!--
+  Samples every animation in carles.js into a frame list for the desktop player.
+
+  Each frame is drawn onto a unit grid (later paint wins, like the canvas), clipped like
+  draw() clips peek, then packed back into rects. A frame is stored for both facings,
+  because some symbols (z, !, notes, bulb) are not mirrored when he faces left.
+
+  Default: writes the JSON into <pre id="out"> (tools/bake.ps1 reads it with --dump-dom).
+  ?view=1&only=build,nap&unit=4  shows the baked frames next to the live drawing.
+-->
+<pre id="out"></pre>
+<div id="view"></div>
+<script src="../carles.js"></script>
+<script>
+'use strict';
+const C = window.Carles;
+const STEP = 66;             // sampling step (ms) for animations that change between keyframes
+const SHADOW = '#00000024';  // rgba(0,0,0,0.14), as draw() paints it
+
+const KEYS = Object.keys(C.PALETTE).concat(['_shadow']);
+const COLORS = KEYS.map((k) => (k === '_shadow' ? SHADOW : C.PALETTE[k]));
+const INDEX = Object.fromEntries(KEYS.map((k, i) => [k, i]));
+
+const int = (v, what) => {
+  if (!Number.isInteger(v)) throw new Error(`non-integer ${what}: ${v}`);
+  return v;
+};
+
+// The pose painted onto a unit grid for one facing: Map "x,y" -> colour index.
+// y = 0 is the row standing on the ground, y = -1 the shadow row under it.
+function raster(pose, f) {
+  const cells = new Map();
+  const cx = pose.clip == null ? null : pose.clip * f;
+  const cs = pose.clipBack ? -f : f;
+  const fill = (x, y, w, h, c) => {
+    int(x, 'x'); int(y, 'y'); int(w, 'w'); int(h, 'h');
+    for (let i = x; i < x + w; i++) {
+      if (cx !== null && (cs > 0 ? i >= cx : i < cx)) continue;
+      for (let j = y; j < y + h; j++) cells.set(i + ',' + j, c);
+    }
+  };
+  const sw = Math.max(6, 14 - Math.floor(pose.y / 2));
+  fill(Math.round(pose.x * f - sw / 2), -1, sw, 1, INDEX._shadow);
+  for (const r of C.buildRects(pose, f)) {
+    if (!(r.c in INDEX)) throw new Error('unknown colour ' + r.c);
+    fill(f > 0 ? r.x : -(r.x + r.w), r.y, r.w, r.h, INDEX[r.c]);
+  }
+  return { cells, edge: cx === null ? null : [cx, cs] };
+}
+
+// Pack cells into rects: horizontal runs per row, then runs stacked with the same x, w and colour.
+function pack(cells) {
+  const rows = new Map();
+  for (const [k, c] of cells) {
+    const [x, y] = k.split(',').map(Number);
+    if (!rows.has(y)) rows.set(y, []);
+    rows.get(y).push([x, c]);
+  }
+  const done = [];
+  let open = new Map(); // "x,w,c" -> rect, extended while the next row repeats the run
+  const ys = [...rows.keys()].sort((a, b) => a - b);
+  let prevY = null;
+  for (const y of ys) {
+    const cs = rows.get(y).sort((a, b) => a[0] - b[0]);
+    const runs = [];
+    for (const [x, c] of cs) {
+      const last = runs[runs.length - 1];
+      if (last && last[0] + last[1] === x && last[2] === c) last[1]++;
+      else runs.push([x, 1, c]);
+    }
+    const next = new Map();
+    for (const [x, w, c] of runs) {
+      const key = x + ',' + w + ',' + c;
+      const r = prevY === y - 1 && open.get(key);
+      if (r) { r[3]++; open.delete(key); next.set(key, r); }
+      else { const nr = [x, y, w, 1, c]; next.set(key, nr); }
+    }
+    for (const r of open.values()) done.push(r);
+    open = next;
+    prevY = y;
+  }
+  for (const r of open.values()) done.push(r);
+  done.sort((a, b) => a[1] - b[1] || a[0] - b[0]);
+  return [].concat(...done); // flat: x, y, w, h, colour, x, y, ...
+}
+
+function bakeAnim(a) {
+  const times = new Set(a.marks);
+  for (let t = 0; t < a.dur; t += STEP) times.add(t); // merged away again where nothing moves
+  const ts = [...times].filter((t) => t < a.dur).sort((x, y) => x - y);
+  const frames = [];
+  ts.forEach((t, k) => {
+    const end = k + 1 < ts.length ? ts[k + 1] : a.dur;
+    const pose = a.pose(t);
+    const pf = pose.facing || 1; // the pose's own facing, combined with the player's like draw() does
+    const R = raster(pose, pf), L = raster(pose, -pf);
+    const fr = { d: end - t, R: pack(R.cells), L: pack(L.cells) };
+    if (R.edge) { fr.eR = R.edge; fr.eL = L.edge; }
+    const sig = JSON.stringify([fr.R, fr.L, fr.eR || null]);
+    const prev = frames[frames.length - 1];
+    if (prev && prev.sig === sig) prev.d += fr.d;
+    else { fr.sig = sig; fr.t = t; frames.push(fr); }
+  });
+  frames.forEach((f) => { delete f.sig; });
+  return { id: a.id, name: a.name, group: a.group, loop: a.loop, travel: a.travel, dur: a.dur, frames };
+}
+
+const baked = { version: 1, unit: 'one character pixel; y up, 0 = ground, x = 0 his centre',
+  keys: KEYS, colors: COLORS, anims: C.ANIMS.map(bakeAnim) };
+
+// Draw one baked frame list onto a canvas, the way the player will.
+function drawBaked(ctx, flat, ox, gy, s) {
+  for (let i = 0; i < flat.length; i += 5) {
+    const [x, y, w, h, c] = flat.slice(i, i + 5);
+    ctx.fillStyle = COLORS[c];
+    ctx.fillRect(ox + x * s, gy - (y + h) * s, w * s, h * s);
+  }
+}
+
+const params = new URLSearchParams(location.search);
+if (params.get('view') === '1') {
+  // Baked (top) and live draw() (bottom) for every baked frame, facing right then left.
+  const s = +params.get('unit') || 3;
+  const only = params.get('only') ? params.get('only').split(',') : null;
+  const view = document.getElementById('view');
+  let bad = 0;
+  for (const a of baked.anims) {
+    if (only && !only.includes(a.id)) continue;
+    const live = C.ANIMS.find((x) => x.id === a.id);
+    const h = document.createElement('h2');
+    h.textContent = `${a.id} — ${a.frames.length} frames, ${a.dur} ms`;
+    const strip = document.createElement('div'); strip.className = 'strip';
+    view.append(h, strip);
+    for (const fr of a.frames) {
+      for (const f of [1, -1]) {
+        const cell = document.createElement('div'); cell.className = 'cell';
+        const c1 = document.createElement('canvas'), c2 = document.createElement('canvas');
+        cell.append(c1, c2);
+        const lbl = document.createElement('div'); lbl.textContent = `${fr.t}+${fr.d}${f < 0 ? ' L' : ''}`;
+        cell.append(lbl);
+        strip.append(cell); // attach first, then size
+        for (const c of [c1, c2]) { c.width = 64 * s; c.height = 52 * s; }
+        const ox = 32 * s, gy = 46 * s;
+        drawBaked(c1.getContext('2d'), f > 0 ? fr.R : fr.L, ox, gy, s);
+        const pose = live.pose(fr.t);
+        C.draw(c2.getContext('2d'), pose, { x: ox, y: gy, scale: s, facing: f });
+        // the lab paints a grey "screen edge" bar for peek; the desktop uses the real edge
+        const edge = f > 0 ? fr.eR : fr.eL;
+        if (edge) {
+          const ex = ox + edge[0] * s;
+          c2.getContext('2d').clearRect(edge[1] > 0 ? ex : ex - s, gy - 30 * s, s, 30 * s);
+        }
+        const d1 = c1.getContext('2d').getImageData(0, 0, c1.width, c1.height).data;
+        const d2 = c2.getContext('2d').getImageData(0, 0, c2.width, c2.height).data;
+        let diff = 0;
+        for (let i = 0; i < d1.length; i += 4) {
+          if (Math.abs(d1[i + 3] - d2[i + 3]) > 2 || Math.abs(d1[i] - d2[i]) > 2) diff++;
+        }
+        if (diff) { bad++; cell.style.outline = '2px solid red'; lbl.textContent += ` diff ${diff}`; }
+      }
+    }
+  }
+  document.title = bad ? `MISMATCH ${bad}` : 'OK';
+  document.getElementById('out').textContent = `frames that differ from draw(): ${bad}`;
+} else {
+  document.getElementById('out').textContent = JSON.stringify(baked);
+}
+</script>
+</body>
+</html>
