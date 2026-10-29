@@ -163,8 +163,9 @@ A frameless, always-on-top window just big enough for Carles, standing on the ta
 | Walking | To a random spot at about 50 px/s, facing the way he walks. About 1 walk in 5, he walks off a screen edge, peeks back in and waves, then walks back on |
 | 60 s without mouse or keyboard input | stretch → yawn → nap. Any input plays wake |
 | Taps | 1 tap → hop, 2 → doubleJump. 3 taps within about 5 s tickle him (giggle and a happy bubble). The 6th tap within 5 s makes him angry (angry and an angry bubble). A tap starts about 0.3 s later, while he waits to see if another one follows |
-| Talking | Every so often (see Talk in the menu) a speech bubble over his head shows a random phrase from `desktop/frases.md`. It follows him as he walks, stays a few seconds, and closes when you click it |
+| Talking | Every so often (see Talk in the menu) a speech bubble over his head shows a random phrase from `desktop/frases.md`. It sits above anything he's holding or showing (hearts, thought clouds, confetti), follows him as he walks, stays a few seconds, and closes when you click it |
 | Coming and going | With Appear set to a time, he visits: he walks in, peeks in from a side or drops in from the top, at a random spot on a random screen, says hello, stays a minute or two, says goodbye and walks off. He only comes back while you're at the computer |
+| Break timer | Set one from the menu and he says goodbye and walks off. When the time is up he goes crazy on the screen you're using, with a bubble telling you to take a break: first he bounces off every edge of the screen like a pinball, then he leaps over to your mouse pointer and jumps about right next to it, leaping after it whenever you move it. Click him to stop (he celebrates), or he calms down by himself after 10 s. Either way he then drops back down to the taskbar. If a full-screen app is open or you're away from the computer, he waits until you're back |
 | More than one screen | Now and then he walks off one screen and drops in on another. Drag him onto any screen and he falls to its taskbar |
 | Pointer resting on him (about 2 s) | love, until the pointer moves away |
 | Drag | dangle from the pointer while held, then he falls to the taskbar and lands (fall → land) |
@@ -182,12 +183,13 @@ Right-click him, or click his icon in the notification area (it may be under the
 | Shirt colour | Pink, red, orange, yellow, green, teal, blue, purple or grey. The tray icon follows |
 | Talk | How often he says something: Often (about every minute), Sometimes (about 5 min, the default), Rarely (about 15 min) or Never |
 | Appear | Always here (the default), or come and go: away for about 5 min, 15 min or an hour between visits |
+| Break timer | 5, 25, 40 or 60 min, once (see Break timer above). While one runs, the tray icon's tooltip shows the minutes left and the submenu has **Cancel timer** |
 | Say something | A random phrase now. While he's away this is **Come here now** instead |
 | Pause | He stands still and ignores clicks until you untick it |
 | Start with Windows | Adds or removes him in your user's startup list (`HKCU\Software\Microsoft\Windows\CurrentVersion\Run`, value `CarlesPet`). It's also listed in Task Manager → Startup apps |
 | Quit | Closes him |
 
-Size, shirt colour, Talk and Appear are remembered in `%APPDATA%\CarlesPet\settings.json`. Delete that file to go back to the defaults.
+Size, shirt colour, Talk and Appear are remembered in `%APPDATA%\CarlesPet\settings.json`. Delete that file to go back to the defaults. A break timer isn't saved, so quitting him cancels it.
 
 **Testing options:** `pythonw -I desktop\carles_pet.py nap` limits him to one animation, and `--sleep-after 10` makes him nap after 10 s instead of 60. `python -I desktop\carles_pet.py --save-icon carles.ico` writes his icon file.
 

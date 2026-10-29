@@ -13,9 +13,11 @@ With an animId he only does that one.
 """
 import ctypes
 import json
+import math
 import os
 import random
 import sys
+import threading
 import time
 import tkinter as tk
 import winreg
@@ -34,7 +36,9 @@ SHIRTS = [('Pink', '#E86AA0'), ('Red', '#D9483B'), ('Orange', '#EE8A2E'), ('Yell
 SIZES = (0.75, 1, 2, 3)   # 1× is 4 screen pixels per unit at 100 % display scaling (0.75× is 3)
 TALK = [('Often', 60), ('Sometimes', 300), ('Rarely', 900), ('Never', 0)]  # about this many seconds between phrases
 APPEAR = [('Always here', 0), ('Every 5 min', 300), ('Every 15 min', 900), ('Every hour', 3600)]  # time away
+BREAKS = (5, 25, 40, 60)  # minutes for the break timer
 BUBBLE_INK, BUBBLE_FILL = '#151515', '#ffffff'
+BUBBLE_GAP = 4            # units between the top of whatever he's drawing and the tip of the bubble's tail
 
 ACTIVITIES = ['idle', 'walk', 'build', 'groove', 'read', 'dance', 'think', 'sweep', 'carry']
 WALK_SPEED = 12.5         # units per second: 50 screen px/s at 4 px per unit
@@ -46,6 +50,9 @@ VISIT = (60, 120)         # seconds he stays on a visit, when he comes and goes
 SCREEN_HOP_CHANCE = 0.05  # with more than one screen, how often he leaves for another one instead of an activity
 DRAG_START = 4            # px the pointer must move while held before it's a drag
 GRAVITY = 600             # units per second², when he's dropped
+ALARM = 10                # seconds he goes crazy when the break timer is up (or until you click him)
+ALARM_BOUNCE = 4          # of those, seconds bouncing round the screen before he chases the pointer
+BOUNCE_SPEED = 220        # units per second sideways while he bounces
 
 user32, kernel32, shell32, gdi32 = ctypes.windll.user32, ctypes.windll.kernel32, ctypes.windll.shell32, ctypes.windll.gdi32
 W = wintypes
@@ -174,6 +181,13 @@ def screen_at(x, y):
     return work_area(user32.MonitorFromPoint(W.POINT(int(x), int(y)), MONITOR_DEFAULTTONEAREST))
 
 
+def cursor():
+    """Where the mouse pointer is, in screen pixels."""
+    pt = W.POINT()
+    user32.GetCursorPos(ctypes.byref(pt))
+    return pt.x, pt.y
+
+
 def screens():
     """The work areas of every screen."""
     found = []
@@ -183,8 +197,9 @@ def screens():
 
 
 def read_phrases(path=PHRASES):
-    """frases.md as lists of phrases by kind: hello, bye, happy, angry, and random for every other heading."""
-    kinds = {'hello': [], 'bye': [], 'happy': [], 'angry': [], 'random': []}
+    """frases.md as lists of phrases by kind: hello, bye, happy, angry, timer, break, thanks, and random
+    for every other heading."""
+    kinds = {'hello': [], 'bye': [], 'happy': [], 'angry': [], 'timer': [], 'break': [], 'thanks': [], 'random': []}
     kind = None  # lines before the first heading are the file's own notes
     try:
         lines = path.read_text(encoding='utf-8').splitlines()
@@ -339,7 +354,10 @@ def popup_menu(owner, items, x, y):
 
 
 class Tray:
-    """His icon in the notification area, on a hidden window of its own. A click calls on_click(x, y)."""
+    """His icon in the notification area, on a hidden window of its own. A click calls on_click(x, y)
+    on a short-lived thread: Windows runs wndproc in the middle of Tk's event loop, and a tkinter call
+    made straight from there makes the next Tk callback abort Python (a fatal PyEval_RestoreThread
+    error). From another thread, tkinter hands the call to the main loop safely."""
 
     def __init__(self, tip, icon, on_click):
         self.on_click = on_click
@@ -357,7 +375,7 @@ class Tray:
         if msg == WM_TRAY and lp & 0xFFFF in (WM_LBUTTONUP, WM_RBUTTONUP):
             pt = W.POINT()
             user32.GetCursorPos(ctypes.byref(pt))
-            self.on_click(pt.x, pt.y)
+            threading.Thread(target=self.on_click, args=(pt.x, pt.y), daemon=True).start()
             return 0
         if msg == self.taskbar_created:  # Explorer restarted: put the icon back
             shell32.Shell_NotifyIconW(NIM_ADD, ctypes.byref(self.nid))
@@ -367,6 +385,10 @@ class Tray:
         old, self.nid.hIcon = self.nid.hIcon, icon
         shell32.Shell_NotifyIconW(NIM_MODIFY, ctypes.byref(self.nid))
         user32.DestroyIcon(old)
+
+    def set_tip(self, tip):
+        self.nid.szTip = tip
+        shell32.Shell_NotifyIconW(NIM_MODIFY, ctypes.byref(self.nid))
 
     def remove(self):
         shell32.Shell_NotifyIconW(NIM_DELETE, ctypes.byref(self.nid))
@@ -461,7 +483,7 @@ class Pet:
         self.left, self.top, self.right, self.ground = screen_at(0, 0)
         self.ax, self.ay = (self.left + self.right) // 2, self.ground  # screen point of his ground point
         self.facing = 1
-        self.mode = 'act'   # act | react | sleep | drag | fall | leave | away | held | paused (for a full-screen app)
+        self.mode = 'act'   # act | react | sleep | drag | fall | leave | away | held | alarm | paused (for a full-screen app)
         self.held = False   # paused from the menu
         self.last = None    # the previous activity, so it's never picked twice in a row
         self.timers = {}
@@ -470,7 +492,10 @@ class Pet:
         self.away = False   # gone off the screen until his next visit
         self.leave_due = None  # 'away' or 'hop' (to another screen): leave at the next change of activity
         self.greet = False  # say hello at the next change of activity
+        self.break_at = None  # time.monotonic() when the break timer is up, while one runs
+        self.alarm = False  # going crazy because the break timer is up
         self.phrases, self.phrases_time = {}, -1
+        self.bubble_top = 0  # units: the highest any animation has reached since the bubble appeared
         self.tray = None
         self.log = None     # a list to record every animation played (for testing)
 
@@ -597,6 +622,8 @@ class Pet:
     # ---------- what he does on his own ----------
 
     def next(self):
+        if self.alarm:
+            return self.frenzy()
         self.mode = 'act'
         s = self.scale
         if idle_ms() >= self.sleep_after * 1000:
@@ -680,7 +707,7 @@ class Pet:
     def plan_visit(self):
         """When he comes and goes: while away, when to come back; while here, when to leave."""
         self.cancel('visit')
-        if not self.appear:
+        if not self.appear or self.break_at:  # no visits while he's away for the break timer
             return
         if self.away:
             self.later('visit', random.uniform(0.5, 1.5) * self.appear * 1000, self.come_back)
@@ -695,8 +722,8 @@ class Pet:
     def leave(self):
         """Walk off the nearer side of the screen (saying goodbye, unless he's off to another screen)."""
         self.mode = 'leave'
-        if self.leave_due == 'away':
-            self.say('bye')
+        if self.leave_due in ('away', 'break'):
+            self.say('timer' if self.leave_due == 'break' else 'bye')
         side = 1 if self.right - self.ax < self.ax - self.left else -1
         edge = self.right if side > 0 else self.left
         self.walk_to(edge + side * 12 * self.scale, then=self.gone, limit=False)
@@ -704,7 +731,7 @@ class Pet:
     def gone(self):
         hop, self.leave_due = self.leave_due == 'hop', None
         self.bubble.hide()
-        if hop or not self.appear:  # off to another screen, or set to "Always here" on his way out
+        if hop or not (self.appear or self.break_at):  # off to another screen, or set to "Always here" on his way out
             return self.arrive(other=hop)
         self.away, self.mode = True, 'away'
         for name in ('frame', 'move', 'clicks'):
@@ -761,19 +788,23 @@ class Pet:
         pool = self.phrases.get(kind)
         return random.choice(pool) if pool else None
 
-    def say(self, kind):
-        """A speech bubble over his head for a few seconds, longer for longer phrases."""
+    def say(self, kind, ms=None):
+        """A speech bubble over his head for a few seconds (longer for longer phrases), or `ms`."""
         text = self.phrase(kind)
         if not text:
             return
         self.bubble.draw(text, self.scale)
+        self.bubble_top = 0
         self.follow()
         self.bubble.show()
-        self.later('bubble', min(9000, 2500 + 70 * len(text)), self.bubble.hide)
+        self.later('bubble', ms or min(9000, 2500 + 70 * len(text)), self.bubble.hide)
 
     def follow(self):
-        """Keep the bubble over his head (as he stands, so it doesn't bob when he hops)."""
-        self.bubble.move(self.ax, self.ay - 25 * self.scale, self.left, self.right)
+        """Keep the bubble above everything the animation draws (props, hearts, hops), so it never
+        covers them. It only moves up while shown, so it doesn't bob between animations."""
+        self.bubble_top = max(self.bubble_top, self.maxy)
+        y = self.ay - (self.bubble_top + BUBBLE_GAP) * self.scale
+        self.bubble.move(self.ax, max(y, self.top + self.bubble.h), self.left, self.right)
 
     # ---------- clicks and dragging ----------
 
@@ -802,6 +833,8 @@ class Pet:
 
     def click(self):
         """1 tap hops and 2 double-jump. 3 taps within a few seconds tickle him, and the 6th makes him angry."""
+        if self.alarm:
+            return self.end_alarm(clicked=True)
         if self.anim['id'] == 'angry':
             return  # let him finish being angry
         now = time.monotonic()
@@ -901,7 +934,7 @@ class Pet:
 
     def resume(self):
         if self.away:
-            if not self.appear:  # set to "Always here" during the full-screen app
+            if not self.appear and not self.break_at:  # set to "Always here" during the full-screen app
                 return self.arrive()
             self.mode = 'away'
             return
@@ -925,6 +958,166 @@ class Pet:
         self.cancel('frame')
         self.mode = 'held'
 
+    # ---------- the break timer ----------
+
+    def start_break(self, minutes):
+        """He goes away for `minutes`, then comes back and goes crazy until you take a break."""
+        self.end_alarm()
+        self.break_at = time.monotonic() + minutes * 60
+        self.later('break', minutes * 60 * 1000, self.break_due)
+        self.update_tip()
+        self.cancel('visit')
+        if self.away or self.mode == 'paused':
+            self.away, self.leave_due = True, None
+            if self.mode != 'paused':
+                self.mode = 'away'
+            self.bubble.hide()
+            return user32.ShowWindow(self.hwnd, SW_HIDE)
+        self.leave_due = 'break'
+        if self.mode not in ('drag', 'fall', 'leave'):  # those carry on, then he leaves
+            self.leave()
+
+    def cancel_break(self):
+        """Stop the timer; he comes back as he would after a visit."""
+        self.cancel('break')
+        self.break_at = None
+        self.update_tip()
+        if self.leave_due == 'break':
+            self.leave_due = None
+            if self.mode == 'leave':  # still on his way out: he stays
+                return self.restart()
+        if self.away and self.mode != 'paused':
+            self.plan_visit() if self.appear else self.arrive()
+
+    def update_tip(self):
+        """The tray tooltip shows the minutes left, updated every minute."""
+        self.cancel('tip')
+        if not self.tray:
+            return
+        if not self.break_at:
+            return self.tray.set_tip('Carles')
+        left = max(1, round((self.break_at - time.monotonic()) / 60))
+        self.tray.set_tip(f'Carles: break in {left} min')
+        self.later('tip', 60000, self.update_tip)
+
+    def break_due(self):
+        if self.mode == 'paused' or idle_ms() >= self.sleep_after * 1000:
+            return self.later('break', 5000, self.break_due)  # not during a full-screen app, or with nobody there
+        self.break_at = None
+        self.update_tip()
+        self.alarm, self.alarm_start = True, time.monotonic()
+        self.later('alarm', ALARM * 1000, self.end_alarm)
+        self.cancel('visit')
+        self.leave_due = None
+        if self.away or self.mode not in ('drag', 'fall'):  # (a drag or fall finishes first)
+            px, py = cursor()
+            self.left, self.top, self.right, self.ground = screen_at(px, py)  # the screen you're using
+            if self.away:  # he comes in at the top
+                self.away = False
+                self.ax, self.ay = self.somewhere(), self.top + 30 * self.scale
+                user32.ShowWindow(self.hwnd, SW_SHOWNOACTIVATE)
+            self.frenzy()
+        self.say('break', ms=ALARM * 1000)
+
+    def frenzy(self):
+        """Going crazy: bouncing round the whole screen, then chasing the pointer, until the alarm ends."""
+        self.mode = 'alarm'
+        if time.monotonic() - self.alarm_start < ALARM_BOUNCE:
+            return self.bounce()
+        px, py = cursor()
+        s = self.scale
+        if self.anim['id'] != 'falling' and abs(px - self.ax) < 30 * s and abs(py - self.ay) < 40 * s:
+            return self.play(random.choice(('hop', 'excited', 'doubleJump')))  # still right by the pointer
+        self.leap(px, py)
+
+    def feet(self):
+        """Where his feet are: the falling pose is drawn 20 units above its ground point."""
+        return self.ay - (20 * self.scale if self.anim['id'] == 'falling' else 0)
+
+    def bounce(self):
+        """Tumbling like a pinball off every edge of the screen."""
+        s, g = self.scale, GRAVITY * self.scale
+        x, y = self.ax, self.feet()
+        self.play('falling', until=lambda: False)
+        self.vx = self.facing * BOUNCE_SPEED * s
+        self.vy = 0.0 if y < self.ground - s else -self.kick()
+        last = time.monotonic()
+
+        def tick():
+            nonlocal x, y, last
+            now = time.monotonic()
+            if now - self.alarm_start >= ALARM_BOUNCE:
+                return self.frenzy()
+            dt, last = min(0.05, now - last), now  # timers tick about every 16 or 31 ms on Windows
+            self.vy += g * dt
+            x, y = x + self.vx * dt, y + self.vy * dt
+            lo, hi = self.left + 10 * s, self.right - 10 * s
+            if not lo <= x <= hi:  # off the sides: turn round
+                x = min(max(x, lo), hi)
+                self.vx = -self.vx
+                self.facing = 1 if self.vx > 0 else -1
+                self.fit()
+                self.build()
+                self.show()
+            if y < self.top + 24 * s:  # his head on the top of the screen
+                y, self.vy = self.top + 24 * s, abs(self.vy)
+            if y > self.ground:  # off the taskbar, high again
+                y, self.vy = self.ground, -self.kick()
+            self.ax, self.ay = x, y + 20 * s
+            self.place()
+            self.later('fall', 16, tick)
+        tick()
+
+    def kick(self):
+        """Speed up off the taskbar to get half to nearly all the way up the screen."""
+        return math.sqrt(2 * GRAVITY * self.scale * (self.ground - self.top) * random.uniform(0.5, 0.9))
+
+    def leap(self, px, py):
+        """A jump in an arc to land beside the pointer at (px, py), facing it."""
+        s, g = self.scale, GRAVITY * self.scale
+        self.left, self.top, self.right, self.ground = screen_at(px, py)
+        side = -1 if self.ax < px else 1  # land on the side he comes from
+        tx = min(max(px + side * 16 * s, self.left + 14 * s), self.right - 14 * s)
+        ty = min(max(py + 12 * s, self.top + 40 * s), self.ground)  # the pointer about level with his chest
+        x0, y0 = self.ax, self.feet()
+        t_end = min(0.8, max(0.35, math.hypot(tx - x0, ty - y0) / (400 * s)))
+        vx, vy = (tx - x0) / t_end, (ty - y0) / t_end - g * t_end / 2
+        self.facing = -side
+        self.play('falling', until=lambda: False)
+        t0 = time.monotonic()
+
+        def tick():
+            t = min(t_end, time.monotonic() - t0)
+            self.ax, self.ay = x0 + vx * t, y0 + vy * t + g * t * t / 2 + 20 * s
+            self.place()
+            if t >= t_end:
+                self.ay = ty
+                return self.play(random.choice(('hop', 'excited', 'doubleJump')))
+            self.later('fall', 16, tick)
+        tick()
+
+    def end_alarm(self, clicked=False):
+        """Stop going crazy: happy if you clicked him, otherwise he just carries on."""
+        self.cancel('alarm')
+        if not self.alarm:
+            return
+        self.alarm = False
+        self.bubble.hide()
+        if self.mode in ('paused', 'drag', 'fall'):
+            return
+        if clicked:
+            self.ay = self.feet()
+            self.react('celebrate', then=self.settle)
+            return self.say('thanks')
+        self.settle()
+
+    def settle(self):
+        """Down to the taskbar if the alarm left him up on the screen, then carry on as usual."""
+        feet = self.feet()
+        if feet < self.ground - self.scale:
+            return self.fall_from(feet)
+        self.restart()  # (or stands still again, if he was paused from the menu)
+
     # ---------- the menu (his tray icon, or right-click on him) ----------
 
     def show_menu(self, x, y):
@@ -936,6 +1129,8 @@ class Pet:
             ('Shirt colour', [(name, c == shirt, lambda c=c: self.set_shirt(c)) for name, c in SHIRTS]),
             ('Talk', [(name, v == self.talk, lambda v=v: self.set_talk(v)) for name, v in TALK]),
             ('Appear', [(name, v == self.appear, lambda v=v: self.set_appear(v)) for name, v in APPEAR]),
+            ('Break timer', [(f'{m} min', False, lambda m=m: self.start_break(m)) for m in BREAKS]
+             + ([None, ('Cancel timer', False, self.cancel_break)] if self.break_at else [])),
             ('Come here now', False, self.call) if self.away else ('Say something', False, lambda: self.say('random')),
             ('Pause', self.held, self.toggle_pause),
             ('Start with Windows', starts_with_windows(), lambda: set_start_with_windows(not starts_with_windows())),
@@ -971,7 +1166,7 @@ class Pet:
         self.save()
         if self.leave_due == 'away':
             self.leave_due = None
-        if self.away and not v and self.mode != 'paused':
+        if self.away and not v and self.mode != 'paused' and not self.break_at:
             return self.arrive()
         self.plan_visit()
 

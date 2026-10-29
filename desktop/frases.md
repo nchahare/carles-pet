@@ -5,6 +5,8 @@ What Carles says in his speech bubbles. Edit freely: he picks up changes without
 - Each `- ` line is one phrase. Keep them short (a bubble wraps after about 30 characters).
 - `## Hello` is said when he arrives, `## Bye` when he leaves, `## Happy` when you tickle him (3 taps)
   and `## Angry` when you overdo it (6 taps or more).
+- The break timer: `## Timer` when he goes off, `## Break` when the time is up and he goes crazy,
+  and `## Thanks` when you click him to stop.
 - Every other heading (`## Random`, or any of your own) is a pool for the random chatter.
 
 ## Random
@@ -80,3 +82,22 @@ What Carles says in his speech bubbles. Edit freely: he picks up changes without
 - Ja n'estic fins als collons!
 - Me cago en tot!
 - Toca't el nas, no a mi!
+
+## Timer
+- Vaig a fer temps. Concentra't, eh!
+- Me'n vaig, que tens feina. Ja et vindré a buscar!
+- Fins d'aquí una estona, treballa fort!
+- Tic-tac... ja tornaré!
+
+## Break
+- Prou feina! Fes una pausa!
+- Descansa una mica, home!
+- Aixeca't i estira les cames!
+- Ves a fer un cafè, va!
+- Para, para, para! Hora de descansar!
+- Mira per la finestra una estona!
+
+## Thanks
+- Molt bé! Gaudeix de la pausa!
+- Així m'agrada!
+- Bon descans!
