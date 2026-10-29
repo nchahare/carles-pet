@@ -1,6 +1,6 @@
 # Carles Pet
 
-A small pixel-art desktop pet: **Carles**, a chibi man with a beard, a moustache and a pink shirt. He and every one of his 36 animations are **drawn in code** from coloured blocks, with no image files. He lives on your Windows taskbar, and you can view and tune his animations in a browser page.
+A small pixel-art desktop pet: **Carles**, a chibi man with a beard, a moustache and a pink shirt. He and every one of his 38 animations are **drawn in code** from coloured blocks, with no image files. He lives on your Windows taskbar (on any of your screens), says things in Catalan in speech bubbles, and you can view and tune his animations in a browser page.
 
 **Status:** the character, the animations and the Windows desktop pet (with a tray menu) are done. Publishing a release is next (see [Roadmap](#roadmap)).
 
@@ -31,6 +31,7 @@ carles-pet/
   tools/bake.ps1             runs the bake in headless Edge -> desktop/carles-frames.json
   desktop/carles-frames.json the baked frames (generated; commit it after re-baking)
   desktop/carles_pet.py      the desktop pet (Python + tkinter, Windows)
+  desktop/frases.md          what he says in his speech bubbles (edit it freely)
   desktop/start-carles.cmd   double-click launcher
   desktop/make-shortcut.ps1  creates a desktop shortcut (and desktop/carles.ico, not tracked)
   README.md
@@ -83,6 +84,7 @@ Every frame is a **pose object**. `BASE` is the neutral pose, and animations sta
 | `lx`, `ly` | Where the eyes look (±1). `lx: -2` puts them mid-face: the front view used while turning |
 | `mouth` | `null` · `'o'` · `'O'` |
 | `blush` | Pink cheek |
+| `red` | Face flushed red (angry) |
 | `facing` | `1` right, `-1` left. The whole drawing is mirrored |
 | `props` | List of attached sprites (see below) |
 | `clip`, `clipBack` | x of a "screen edge" that hides everything past it, used by Peek. `clipBack` hides the side behind him instead |
@@ -99,7 +101,7 @@ Every frame is a **pose object**. `BASE` is the neutral pose, and animations sta
   - `ground`: on the floor, ignoring jumps
 - `headphones` and `glasses` are drawn by code because they follow his head and eyes.
 - **Palette letters:**
-  - `o` shirt (pink `#E86AA0`, changed by the colour picker), `s` skin, `h` hair, `d` beard, `t` trousers
+  - `o` shirt (pink `#E86AA0`, changed by the colour picker), `s` skin, `R` flushed skin, `h` hair, `d` beard, `t` trousers
   - `k` eyes, `i` ink (symbols, switched for dark mode), `w` white
   - `g`/`G` grey, `b` wood, `y` yellow, `r` red, `p` pink, `B` navy, `n` blue, `c`/`C` cardboard
 
@@ -123,7 +125,7 @@ add('hop', 'Happy hop', 'Reactions', seq([
 
 To add an animation, write an `add(...)` block in `carles.js`. It appears automatically in the list, the gallery and the sheet.
 
-### All 36 animations
+### All 38 animations
 
 | Group | Animations (`id`) |
 |---|---|
@@ -131,8 +133,8 @@ To add an animation, write an `add(...)` block in `carles.js`. It appears automa
 | Movement | walk, walkAcross\*, turn, scuttle\*, hopAlong\*, peek |
 | Activities | build, groove, dance, think, read, type, sweep, carry\*, juggle |
 | Rest | stretch¹, yawn¹, nap, wake¹, sit |
-| Reactions | hop, doubleJump, annoyed, dangle, fall, land, love, surprised |
-| Moods | sad, excited, tired, celebrate |
+| Reactions | hop, doubleJump, annoyed, giggle, dangle, fall, land, love, surprised |
+| Moods | sad, excited, tired, celebrate, angry |
 
 \* moves across the stage (`travel`) · ¹ plays once (`loop: false`)
 
@@ -151,7 +153,7 @@ Headless Edge or Chrome can render the contact sheet to a PNG:
 
 ## The desktop pet
 
-A frameless, always-on-top window just big enough for Carles, standing on the taskbar of the main screen. Clicks pass through the empty space around him. He has no taskbar button, doesn't appear in Alt+Tab, and clicking him doesn't take focus from your window. Only one copy runs at a time.
+A frameless, always-on-top window just big enough for Carles, standing on the taskbar of one of your screens. Clicks pass through the empty space around him. He has no taskbar button, doesn't appear in Alt+Tab, and clicking him doesn't take focus from your window. Only one copy runs at a time.
 
 ### What he does
 
@@ -160,7 +162,10 @@ A frameless, always-on-top window just big enough for Carles, standing on the ta
 | On his own | Picks idle, walk, build, groove, read, dance, think, sweep or carry for 5–10 s. Never the same one twice in a row |
 | Walking | To a random spot at about 50 px/s, facing the way he walks. About 1 walk in 5, he walks off a screen edge, peeks back in and waves, then walks back on |
 | 60 s without mouse or keyboard input | stretch → yawn → nap. Any input plays wake |
-| Clicks | 1 click → hop, 2 → doubleJump, 4 fast clicks → annoyed. A single click starts about 0.3 s later, while he waits to see if a second one follows |
+| Taps | 1 tap → hop, 2 → doubleJump. 3 taps within about 5 s tickle him (giggle and a happy bubble). The 6th tap within 5 s makes him angry (angry and an angry bubble). A tap starts about 0.3 s later, while he waits to see if another one follows |
+| Talking | Every so often (see Talk in the menu) a speech bubble over his head shows a random phrase from `desktop/frases.md`. It follows him as he walks, stays a few seconds, and closes when you click it |
+| Coming and going | With Appear set to a time, he visits: he walks in, peeks in from a side or drops in from the top, at a random spot on a random screen, says hello, stays a minute or two, says goodbye and walks off. He only comes back while you're at the computer |
+| More than one screen | Now and then he walks off one screen and drops in on another. Drag him onto any screen and he falls to its taskbar |
 | Pointer resting on him (about 2 s) | love, until the pointer moves away |
 | Drag | dangle from the pointer while held, then he falls to the taskbar and lands (fall → land) |
 | Full-screen app, game or presentation in front | He hides and stops completely, and comes back afterwards |
@@ -173,15 +178,21 @@ Right-click him, or click his icon in the notification area (it may be under the
 
 | Item | What it does |
 |---|---|
-| Size | 1× (about 88 px tall at 100 % display scaling), 2× or 3× |
+| Size | 0.75×, 1× (about 88 px tall at 100 % display scaling), 2× or 3× |
 | Shirt colour | Pink, red, orange, yellow, green, teal, blue, purple or grey. The tray icon follows |
+| Talk | How often he says something: Often (about every minute), Sometimes (about 5 min, the default), Rarely (about 15 min) or Never |
+| Appear | Always here (the default), or come and go: away for about 5 min, 15 min or an hour between visits |
+| Say something | A random phrase now. While he's away this is **Come here now** instead |
 | Pause | He stands still and ignores clicks until you untick it |
 | Start with Windows | Adds or removes him in your user's startup list (`HKCU\Software\Microsoft\Windows\CurrentVersion\Run`, value `CarlesPet`). It's also listed in Task Manager → Startup apps |
 | Quit | Closes him |
 
-Size and shirt colour are remembered in `%APPDATA%\CarlesPet\settings.json`. Delete that file to go back to the defaults.
+Size, shirt colour, Talk and Appear are remembered in `%APPDATA%\CarlesPet\settings.json`. Delete that file to go back to the defaults.
 
 **Testing options:** `pythonw -I desktop\carles_pet.py nap` limits him to one animation, and `--sleep-after 10` makes him nap after 10 s instead of 60. `python -I desktop\carles_pet.py --save-icon carles.ico` writes his icon file.
+
+### What he says (`desktop/frases.md`)
+A Markdown file of phrases, in Catalan. Each `- ` line is one phrase, grouped under headings: `## Hello` (arriving), `## Bye` (leaving), `## Happy` (tickled), `## Angry` (tapped too much). Every other heading, like `## Random`, adds to the random chatter. Lines before the first heading are notes and are ignored. He reads the file again whenever it changes, so there's no need to restart him.
 
 **Resource use** (measured on Windows 11): about 0.1 % CPU and 15 MB of memory. He only redraws when a frame changes and sleeps in between.
 
@@ -208,13 +219,13 @@ This needs Microsoft Edge (or change the path in the script to Chrome). To check
 
 **Desktop limitations:**
 - The window uses one see-through colour (tkinter's `-transparentcolor`), so the soft ground shadow is left out.
-- Main screen only.
+- Every screen uses the scale of the main screen, so on a screen with different display scaling he looks a little soft.
 - If the taskbar moves while he runs, restart him.
 
 ## Roadmap
 
 - **Next:** a GitHub release with a short "how to install" for people who aren't developers.
-- **Ideas:** a custom shirt colour picker, more than one screen, and small visual fixes (for example, the cursor drawn while he dangles is hard to see on dark backgrounds).
+- **Ideas:** a custom shirt colour picker, standing on top of windows, and small visual fixes (for example, the cursor drawn while he dangles is hard to see on dark backgrounds).
 
 ---
 

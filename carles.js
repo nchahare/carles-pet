@@ -13,6 +13,7 @@
   const PALETTE = {
     o: '#E86AA0', // shirt, pink (the preview's colour picker overrides 'o')
     s: '#E8AE74', // skin
+    R: '#E2725B', // skin flushed red (angry)
     h: '#151515', // hair
     d: '#3B2618', // beard and moustache
     t: '#3A2A4E', // trousers
@@ -42,6 +43,7 @@
     lx: 0, ly: 0,        // where the eyes look
     mouth: null,         // null | 'o' | 'O'
     blush: false,
+    red: false,          // face flushed red
     facing: 1,           // 1 = right, -1 = left
     props: [],           // [{ s: spriteName, a: anchor, dx, dy }]
     clip: null,          // x of a screen edge he can hide behind (peek)
@@ -81,9 +83,10 @@
     tear:       ['n', 'n'],
     sweat:      ['.n.', 'nnn', '.n.'],
     cfR: ['r'], cfY: ['y'], cfN: ['n'], cfP: ['p'], cfG: ['g'],
+    ha:         ['i.i.iii', 'i.i.i.i', 'iii.iii', 'i.i.i.i', 'i.i.i.i'],
   };
   // Symbols that must still read correctly when he faces left.
-  const NOFLIP = new Set(['zBig', 'zSmall', 'excl', 'note', 'bulb']);
+  const NOFLIP = new Set(['zBig', 'zSmall', 'excl', 'note', 'bulb', 'ha']);
 
   const EYES = {
     open:  ['kk', 'kk'],
@@ -145,7 +148,8 @@
     const handR = hand(1, p.armR);
 
     // head, then hair: a band across the top and a strip down the back to eye level
-    rect(-8, hb, 16, 12, 's');
+    const skin = p.red ? 'R' : 's';
+    rect(-8, hb, 16, 12, skin);
     rect(-8, top - 2, 16, 2, 'h');
     rect(-8, hb + 5, 2, 5, 'h');
 
@@ -155,7 +159,7 @@
     rect(2, hb + 3, 6, 1, 'd');            // moustache
     if (p.mouth === 'o') rect(3, hb + 1, 2, 2, 'k');
     else if (p.mouth === 'O') rect(3, hb, 2, 3, 'k');
-    else rect(2, hb + 2, 4, 1, 's');
+    else rect(2, hb + 2, 4, 1, skin);
 
     // eyes, both on the front half of the face
     if (p.eyes !== 'none') {
@@ -609,6 +613,27 @@
     [400, {}],
   ]));
 
+  // giggle: tickled, he shakes with laughter and "HA"s bubble up in front of and behind his head
+  const GIG = { eyes: 'happy', blush: true, armL: 1, armR: 1 };
+  const gig = (d) => Object.assign({}, GIG, d);
+  add('giggle', 'Giggle (tickled)', 'Reactions', seq([
+    [200, {}],
+    [100, gig(CROUCH)],
+    [120, gig({ y: 2, legH: 5, armL: 2, armR: 2, mouth: 'o' })],
+    [100, gig(CROUCH)],
+    ...[1, -1, 1, -1, 1, -1, 1, -1].map((x, i) => [100, gig({ x, bh: i % 2 ? -1 : 0, mouth: i % 2 ? null : 'o' })]),
+    [300, gig({ eyes: 'line', bh: 1, mouth: 'o' })],
+    [260, {}],
+  ]), {
+    extra(t, d, i) {
+      if (i === 0 || i === 13) return;
+      [[9, 0], [-16, 0.5]].forEach(([dx, k]) => {
+        const ph = (t / 1000 + k) % 1;
+        if (ph < 0.8) d.props.push(P('ha', 'head', dx + (Math.floor(ph * 6) % 2), 1 + Math.floor(ph * 12)));
+      });
+    },
+  });
+
   // the cursor's tip is pinched into the hair band on top of his head
   add('dangle', 'Picked up (dangling)', 'Reactions', seq(
     [[0, [0, 2]], [1, [2, 0]], [0, [0, 2]], [-1, [2, 0]]].map(([x, lift]) => [300, { x, lift }]),
@@ -683,6 +708,40 @@
     extra(t, d) {
       const ph = (t / 1800) % 1;
       d.props.push(P('sweat', 'head', 7, -5 - Math.floor(ph * 5)));
+    },
+  });
+
+  // angry: worse than annoyed. A red face and steam from his head, stomping, then both fists shaken at you
+  const MAD = (d = {}) => Object.assign({ red: true, eyes: 'angry', armL: -2, armR: -2 }, d, { props: [ANG, ...(d.props || [])] });
+  const STOMP = [
+    [130, MAD({ lift: [2, 0] })],
+    [110, MAD({ bh: -1, props: [P('dust', 'ground', -10)] })],
+    [130, MAD({ lift: [0, 2] })],
+    [110, MAD({ bh: -1, props: [P('dust', 'ground', 7)] })],
+  ];
+  const SHAKE = [
+    [150, MAD({ y: 2, legH: 5, armL: 'up', armR: 2, mouth: 'O' })],
+    [150, MAD({ y: 2, legH: 5, armL: 2, armR: 'up', mouth: 'O' })],
+  ];
+  add('angry', 'Angry (steaming)', 'Moods', seq([
+    [200, {}],
+    [100, { bh: -1, eyes: 'angry', props: [ANG] }],
+    [200, MAD({ bh: -1 })],
+    ...STOMP, ...STOMP,
+    [100, MAD(CROUCH)],
+    ...SHAKE, ...SHAKE,
+    [120, MAD(CROUCH)],
+    [500, MAD({ bh: 1, mouth: 'o' })],       // fuming
+    [300, { eyes: 'line', bh: 1 }],          // huff
+    [400, {}],
+  ]), {
+    extra(t, d) { // puffs of steam, growing as they rise off both sides of his head
+      if (!d.red) return;
+      [[9, 0], [-12, 0.5]].forEach(([dx, k]) => {
+        const ph = (t / 600 + k) % 1;
+        const s = ph < 0.35 ? 'dotS' : ph < 0.7 ? 'dotM' : 'dotL';
+        d.props.push(P(s, 'head', dx + Math.sign(dx) * Math.floor(ph * 3), -4 + Math.floor(ph * 12)));
+      });
     },
   });
 

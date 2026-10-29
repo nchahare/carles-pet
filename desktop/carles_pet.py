@@ -1,13 +1,14 @@
 """Carles desktop pet: plays the frames baked from carles.js (tools/bake.ps1) in a frameless,
-always-on-top window that is only as big as he is, standing on the taskbar. Standard library only
-(tkinter), Windows, main screen.
+always-on-top window that is only as big as he is, standing on the taskbar of any screen. Standard
+library only (tkinter), Windows.
 
     pythonw -I desktop\\carles_pet.py [animId] [--sleep-after SECONDS]
     python -I desktop\\carles_pet.py --save-icon carles.ico     (writes his icon; used by make-shortcut.ps1)
 
-He picks his own activities and walks about. Click him (1, 2 or 4 times), rest the pointer on him,
-or drag him and let go. Leave the computer alone for a minute and he naps. Right-click him, or click
-his icon by the clock, for size, shirt colour, pause, start with Windows and quit.
+He picks his own activities, walks about and now and then says something from frases.md in a speech
+bubble. Tap him (1, 2, 3 or 6 times), rest the pointer on him, or drag him and let go. Leave the
+computer alone for a minute and he naps. Right-click him, or click his icon by the clock, for size,
+shirt colour, how often he talks, whether he stays or comes and goes, pause, start with Windows and quit.
 With an animId he only does that one.
 """
 import ctypes
@@ -15,12 +16,14 @@ import json
 import os
 import random
 import sys
+import time
 import tkinter as tk
 import winreg
 from ctypes import wintypes
 from pathlib import Path
 
 FRAMES = Path(__file__).with_name('carles-frames.json')
+PHRASES = Path(__file__).with_name('frases.md')
 SETTINGS = Path(os.environ.get('APPDATA') or Path.home()) / 'CarlesPet' / 'settings.json'
 RUN_KEY, RUN_NAME = r'Software\Microsoft\Windows\CurrentVersion\Run', 'CarlesPet'
 KEY = '#ff00fe'           # the see-through colour; not used by any part of him
@@ -28,13 +31,19 @@ INK_DARK = '#e8e2d8'      # symbols (z, !) on dark windows, as the lab uses on a
 SHIRTS = [('Pink', '#E86AA0'), ('Red', '#D9483B'), ('Orange', '#EE8A2E'), ('Yellow', '#F2CF48'),
           ('Green', '#4CAF6A'), ('Teal', '#2BA5A0'), ('Blue', '#3D7FD6'), ('Purple', '#8E5BC8'),
           ('Grey', '#8A8F98')]
-SIZES = (1, 2, 3)         # 1× is 4 screen pixels per unit at 100 % display scaling
+SIZES = (0.75, 1, 2, 3)   # 1× is 4 screen pixels per unit at 100 % display scaling (0.75× is 3)
+TALK = [('Often', 60), ('Sometimes', 300), ('Rarely', 900), ('Never', 0)]  # about this many seconds between phrases
+APPEAR = [('Always here', 0), ('Every 5 min', 300), ('Every 15 min', 900), ('Every hour', 3600)]  # time away
+BUBBLE_INK, BUBBLE_FILL = '#151515', '#ffffff'
 
 ACTIVITIES = ['idle', 'walk', 'build', 'groove', 'read', 'dance', 'think', 'sweep', 'carry']
 WALK_SPEED = 12.5         # units per second: 50 screen px/s at 4 px per unit
 SLEEP_AFTER = 60          # seconds without input before he stretches, yawns and naps
 PEEK_CHANCE = 0.2         # how often a walk goes off to a screen edge to peek instead
 CLICK_GAP = 300           # ms: clicks closer together than this count as one burst
+TAP_MEMORY = 5            # seconds: taps this recent count toward tickling him (3) and making him angry (6)
+VISIT = (60, 120)         # seconds he stays on a visit, when he comes and goes
+SCREEN_HOP_CHANCE = 0.05  # with more than one screen, how often he leaves for another one instead of an activity
 DRAG_START = 4            # px the pointer must move while held before it's a drag
 GRAVITY = 600             # units per second², when he's dropped
 
@@ -42,6 +51,7 @@ user32, kernel32, shell32, gdi32 = ctypes.windll.user32, ctypes.windll.kernel32,
 W = wintypes
 LRESULT = ctypes.c_ssize_t
 WNDPROC = ctypes.WINFUNCTYPE(LRESULT, W.HWND, W.UINT, W.WPARAM, W.LPARAM)
+MONITORENUMPROC = ctypes.WINFUNCTYPE(W.BOOL, W.HMONITOR, W.HDC, ctypes.POINTER(W.RECT), W.LPARAM)
 
 
 def sig(fn, res, *args):
@@ -70,12 +80,19 @@ sig(gdi32.CreateDIBSection, W.HBITMAP, W.HDC, W.LPVOID, W.UINT, ctypes.POINTER(c
 sig(gdi32.CreateBitmap, W.HBITMAP, ctypes.c_int, ctypes.c_int, W.UINT, W.UINT, W.LPVOID)
 sig(gdi32.DeleteObject, W.BOOL, W.HGDIOBJ)
 sig(shell32.Shell_NotifyIconW, W.BOOL, W.DWORD, W.LPVOID)
+sig(user32.ShowWindow, W.BOOL, W.HWND, ctypes.c_int)
+sig(user32.SetWindowPos, W.BOOL, W.HWND, W.HWND, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int, W.UINT)
+sig(user32.IsWindowVisible, W.BOOL, W.HWND)
+sig(user32.EnumDisplayMonitors, W.BOOL, W.HDC, W.LPVOID, MONITORENUMPROC, W.LPARAM)
+sig(user32.MonitorFromPoint, W.HMONITOR, W.POINT, W.DWORD)
 sig(kernel32.GetModuleHandleW, W.HMODULE, W.LPCWSTR)
 sig(kernel32.CloseHandle, W.BOOL, W.HANDLE)
 kernel32.GetTickCount.restype = W.DWORD
 GWL_EXSTYLE = -20
 WS_EX_TOOLWINDOW, WS_EX_NOACTIVATE = 0x80, 0x8000000
-SPI_GETWORKAREA = 0x30
+SW_HIDE, SW_SHOWNOACTIVATE = 0, 4
+SWP_NOZORDER, SWP_NOACTIVATE = 0x4, 0x10
+MONITOR_DEFAULTTONEAREST = 2
 GA_ROOT = 2
 QUNS_FULLSCREEN = (2, 3, 4)  # busy (full-screen app), Direct3D full screen, presentation mode
 SM_CXSMICON = 49
@@ -88,6 +105,13 @@ TPM_RIGHTBUTTON, TPM_NONOTIFY, TPM_RETURNCMD = 0x2, 0x80, 0x100
 
 class LASTINPUTINFO(ctypes.Structure):
     _fields_ = [('cbSize', W.UINT), ('dwTime', W.DWORD)]
+
+
+class MONITORINFO(ctypes.Structure):
+    _fields_ = [('cbSize', W.DWORD), ('rcMonitor', W.RECT), ('rcWork', W.RECT), ('dwFlags', W.DWORD)]
+
+
+sig(user32.GetMonitorInfoW, W.BOOL, W.HMONITOR, ctypes.POINTER(MONITORINFO))
 
 
 class NOTIFYICONDATAW(ctypes.Structure):
@@ -137,11 +161,42 @@ def load():
     return keys, data['colors'], anims
 
 
-def work_area():
-    """The main screen minus the taskbar: (left, top, right, bottom)."""
-    r = wintypes.RECT()
-    user32.SystemParametersInfoW(SPI_GETWORKAREA, 0, ctypes.byref(r), 0)
+def work_area(monitor):
+    """A screen minus its taskbar: (left, top, right, bottom)."""
+    mi = MONITORINFO(cbSize=ctypes.sizeof(MONITORINFO))
+    user32.GetMonitorInfoW(monitor, ctypes.byref(mi))
+    r = mi.rcWork
     return r.left, r.top, r.right, r.bottom
+
+
+def screen_at(x, y):
+    """The work area of the screen at (or nearest to) a point. The main screen is the one at (0, 0)."""
+    return work_area(user32.MonitorFromPoint(W.POINT(int(x), int(y)), MONITOR_DEFAULTTONEAREST))
+
+
+def screens():
+    """The work areas of every screen."""
+    found = []
+    cb = MONITORENUMPROC(lambda m, dc, r, lp: found.append(work_area(m)) or True)
+    user32.EnumDisplayMonitors(None, None, cb, 0)
+    return found or [screen_at(0, 0)]
+
+
+def read_phrases(path=PHRASES):
+    """frases.md as lists of phrases by kind: hello, bye, happy, angry, and random for every other heading."""
+    kinds = {'hello': [], 'bye': [], 'happy': [], 'angry': [], 'random': []}
+    kind = None  # lines before the first heading are the file's own notes
+    try:
+        lines = path.read_text(encoding='utf-8').splitlines()
+    except OSError:
+        return kinds
+    for line in map(str.strip, lines):
+        if line.startswith('## '):
+            kind = line[3:].strip().lower()
+            kind = kind if kind in kinds else 'random'
+        elif kind and line[:2] in ('- ', '* ') and line[2:].strip():
+            kinds[kind].append(line[2:].strip())
+    return kinds
 
 
 def idle_ms():
@@ -318,21 +373,104 @@ class Tray:
         user32.DestroyIcon(self.nid.hIcon)
 
 
+def put(win, hwnd, w, h, x, y):
+    """Size and move a window straight away. Tk alone doesn't move a window hidden with ShowWindow."""
+    win.geometry(f'{w}x{h}+{x}+{y}')
+    user32.SetWindowPos(hwnd, None, x, y, w, h, SWP_NOZORDER | SWP_NOACTIVATE)
+
+
+def no_focus(hwnd):
+    """No taskbar button, not in Alt+Tab, and clicking it doesn't take focus from your window."""
+    user32.SetWindowLongW(hwnd, GWL_EXSTYLE, user32.GetWindowLongW(hwnd, GWL_EXSTYLE) | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE)
+
+
+class Bubble:
+    """A speech bubble in a see-through window of its own, drawn in blocks like him, with its tail
+    pointing down at his head. Clicking it closes it. Shown and hidden with ShowWindow, so it never
+    takes focus from your window."""
+
+    def __init__(self, root):
+        self.win = tk.Toplevel(root)
+        self.win.overrideredirect(True)
+        self.win.attributes('-topmost', True)
+        self.win.attributes('-transparentcolor', KEY)
+        self.win.geometry('1x1+-32000+-32000')
+        self.canvas = tk.Canvas(self.win, bg=KEY, highlightthickness=0, bd=0)
+        self.canvas.pack()
+        self.win.update_idletasks()
+        self.hwnd = user32.GetParent(self.win.winfo_id())
+        no_focus(self.hwnd)
+        self.hide()
+        self.canvas.bind('<ButtonRelease-1>', lambda e: self.hide())
+        self.w = self.h = self.u = 0
+        self.tail = None
+
+    def draw(self, text, scale):
+        """The bubble for `text`, sized to it; `scale` is his screen pixels per unit."""
+        c, u = self.canvas, max(2, scale // 2)  # u: one block of the bubble's outline
+        c.delete('all')
+        t = c.create_text(0, 0, text=text, font=('Segoe UI', -max(11, round(3.25 * scale))), fill=BUBBLE_INK,
+                          width=44 * scale, justify='center', anchor='nw')
+        x0, y0, x1, y1 = c.bbox(t)
+        w = -(-(x1 - x0 + 6 * u) // u) * u  # room around the text, in whole blocks
+        h = -(-(y1 - y0 + 4 * u) // u) * u
+        c.move(t, (w - x1 + x0) // 2 - x0, (h - y1 + y0) // 2 - y0)
+        # an outline with the corners cut off, and white inside it
+        for r, col in (((u, 0, w - u, h), BUBBLE_INK), ((0, u, w, h - u), BUBBLE_INK),
+                       ((2 * u, u, w - 2 * u, h - u), BUBBLE_FILL), ((u, 2 * u, w - u, h - 2 * u), BUBBLE_FILL)):
+            c.create_rectangle(*r, fill=col, width=0)
+        c.tag_raise(t)
+        self.w, self.h, self.u, self.tail = w, h + 3 * u, u, None
+        c.config(width=self.w, height=self.h)
+
+    def move(self, x, y, left, right):
+        """Put the tip of the tail at screen point (x, y), keeping the bubble between left and right."""
+        u = self.u
+        bx = min(max(round(x) - self.w // 2, left), right - self.w)
+        tx = min(max(round(x) - bx, 2 * u), self.w - 5 * u)
+        tx -= tx % u
+        if tx != self.tail:  # a stepped tail: a straight side at tx and a slope on the right, 3 blocks down
+            self.tail = tx
+            self.canvas.delete('tail')
+            for k in range(4):
+                y0 = self.h - 4 * u + k * u
+                self.canvas.create_rectangle(tx - u, y0, tx + (4 - k) * u, y0 + u, fill=BUBBLE_INK, width=0, tags='tail')
+                if k < 3:
+                    self.canvas.create_rectangle(tx, y0, tx + (3 - k) * u, y0 + u, fill=BUBBLE_FILL, width=0, tags='tail')
+        put(self.win, self.hwnd, self.w, self.h, bx, round(y) - self.h)
+
+    def show(self):
+        user32.ShowWindow(self.hwnd, SW_SHOWNOACTIVATE)
+
+    def hide(self):
+        user32.ShowWindow(self.hwnd, SW_HIDE)
+
+    @property
+    def visible(self):
+        return bool(user32.IsWindowVisible(self.hwnd))
+
+
 class Pet:
-    def __init__(self, palette, anims, scale, only=None, sleep_after=SLEEP_AFTER, size=1):
+    def __init__(self, palette, anims, scale, only=None, sleep_after=SLEEP_AFTER, size=1, talk=300, appear=0):
         self.keys, self.colors = palette
         self.anims, self.base, self.size = anims, scale, size
-        self.scale = scale * size  # screen pixels per unit
+        self.scale = max(1, round(scale * size))  # screen pixels per unit, always whole
         self.activities = only or ACTIVITIES
         self.sleep_after = sleep_after
-        self.left, _, self.right, self.ground = work_area()
+        self.talk, self.appear = talk, appear  # seconds between phrases, and away (0: never / always here)
+        self.left, self.top, self.right, self.ground = screen_at(0, 0)
         self.ax, self.ay = (self.left + self.right) // 2, self.ground  # screen point of his ground point
         self.facing = 1
-        self.mode = 'act'   # act | react | sleep | drag | fall | held | paused (for a full-screen app)
+        self.mode = 'act'   # act | react | sleep | drag | fall | leave | away | held | paused (for a full-screen app)
         self.held = False   # paused from the menu
         self.last = None    # the previous activity, so it's never picked twice in a row
         self.timers = {}
         self.clicks, self.press, self.hover = 0, None, 0
+        self.taps = []      # times of recent taps
+        self.away = False   # gone off the screen until his next visit
+        self.leave_due = None  # 'away' or 'hop' (to another screen): leave at the next change of activity
+        self.greet = False  # say hello at the next change of activity
+        self.phrases, self.phrases_time = {}, -1
         self.tray = None
         self.log = None     # a list to record every animation played (for testing)
 
@@ -343,16 +481,17 @@ class Pet:
         self.canvas = tk.Canvas(self.root, bg=KEY, highlightthickness=0, bd=0)
         self.canvas.pack()
         self.root.update_idletasks()
-        # no taskbar button, not in Alt+Tab, and clicking him doesn't take focus from your window
         self.hwnd = user32.GetParent(self.root.winfo_id())
-        user32.SetWindowLongW(self.hwnd, GWL_EXSTYLE,
-                              user32.GetWindowLongW(self.hwnd, GWL_EXSTYLE) | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE)
+        no_focus(self.hwnd)
+        self.bubble = Bubble(self.root)
 
         self.canvas.bind('<ButtonPress-1>', self.on_press)
         self.canvas.bind('<B1-Motion>', self.on_motion)
         self.canvas.bind('<ButtonRelease-1>', self.on_release)
         self.canvas.bind('<ButtonRelease-3>', lambda e: self.show_menu(e.x_root, e.y_root))
         self.later('poll', 1000, self.poll)
+        self.plan_talk()
+        self.plan_visit()
         self.root.after_idle(self.next)
 
     # ---------- timers ----------
@@ -421,7 +560,9 @@ class Pet:
         x, y = round(self.ax) + self.minx * s, round(self.ay) - self.maxy * s
         self.canvas.coords('maskL', 0, 0, min(self.w, max(0, self.left - x)), self.h)
         self.canvas.coords('maskR', max(0, min(self.w, self.right - x)), 0, self.w, self.h)
-        self.root.geometry(f'{self.w}x{self.h}+{x}+{y}')
+        put(self.root, self.hwnd, self.w, self.h, x, y)
+        if self.bubble.visible:
+            self.follow()
 
     def show(self):
         if self.shown is not None:
@@ -460,8 +601,16 @@ class Pet:
         s = self.scale
         if idle_ms() >= self.sleep_after * 1000:
             return self.sleep()
+        if self.leave_due:
+            return self.leave()
         if not self.left + 10 * s <= self.ax <= self.right - 10 * s:
             return self.walk_to(self.somewhere())  # left half off the screen by a reaction
+        if self.greet:
+            self.greet = False
+            self.say('hello')
+        if self.activities is ACTIVITIES and random.random() < SCREEN_HOP_CHANCE and len(screens()) > 1:
+            self.leave_due = 'hop'
+            return self.leave()
         pick = random.choice([a for a in self.activities if a != self.last] or self.activities)
         self.last = pick
         if pick == 'walk' and random.random() < PEEK_CHANCE and self.activities is ACTIVITIES:
@@ -489,8 +638,9 @@ class Pet:
             then()
         self.play('front', face)
 
-    def peek(self, side):
-        """Walk off the screen at one side, peek back in from the edge, then walk back on."""
+    def peek(self, side, walk_out=True):
+        """Walk off the screen at one side, peek back in from the edge, then walk back on.
+        Without `walk_out` he starts behind the edge (arriving on a visit)."""
         s = self.scale
         edge = self.right if side > 0 else self.left
 
@@ -504,6 +654,8 @@ class Pet:
             self.ax = edge + side * 14 * s  # where peek leaves him, just behind the edge
             self.walk_to(self.somewhere(), limit=False)
 
+        if not walk_out:
+            return look()
         self.walk_to(edge + side * 10 * s, then=look, limit=False)
 
     def sleep(self):
@@ -522,6 +674,106 @@ class Pet:
         """Reactions to you start straight away, without waiting for the end of a cycle."""
         self.mode = 'react'
         self.play(anim_id, **kw)
+
+    # ---------- coming and going ----------
+
+    def plan_visit(self):
+        """When he comes and goes: while away, when to come back; while here, when to leave."""
+        self.cancel('visit')
+        if not self.appear:
+            return
+        if self.away:
+            self.later('visit', random.uniform(0.5, 1.5) * self.appear * 1000, self.come_back)
+        else:
+            self.later('visit', random.uniform(*VISIT) * 1000, lambda: setattr(self, 'leave_due', self.leave_due or 'away'))
+
+    def come_back(self):
+        if self.mode == 'paused' or self.held or idle_ms() >= self.sleep_after * 1000:
+            return self.later('visit', 30000, self.come_back)  # not during a full-screen app, on hold, or with nobody there
+        self.arrive()
+
+    def leave(self):
+        """Walk off the nearer side of the screen (saying goodbye, unless he's off to another screen)."""
+        self.mode = 'leave'
+        if self.leave_due == 'away':
+            self.say('bye')
+        side = 1 if self.right - self.ax < self.ax - self.left else -1
+        edge = self.right if side > 0 else self.left
+        self.walk_to(edge + side * 12 * self.scale, then=self.gone, limit=False)
+
+    def gone(self):
+        hop, self.leave_due = self.leave_due == 'hop', None
+        self.bubble.hide()
+        if hop or not self.appear:  # off to another screen, or set to "Always here" on his way out
+            return self.arrive(other=hop)
+        self.away, self.mode = True, 'away'
+        for name in ('frame', 'move', 'clicks'):
+            self.cancel(name)
+        user32.ShowWindow(self.hwnd, SW_HIDE)
+        self.plan_visit()
+
+    def arrive(self, other=False):
+        """Come on to a random screen (another one if `other`) at a random spot: walking or peeking
+        in from a side, or dropping in from the top."""
+        here = (self.left, self.top, self.right, self.ground)
+        self.left, self.top, self.right, self.ground = random.choice([a for a in screens() if not other or a != here] or [here])
+        self.away, self.greet, self.mode = False, True, 'act'
+        s = self.scale
+        side = random.choice((-1, 1))
+        edge = self.right if side > 0 else self.left
+        self.ay = self.ground
+        way = 'still' if self.held else random.choice(('walk', 'peek', 'drop'))
+        if way == 'still':  # on hold from the menu: he just stands there
+            self.ax = self.somewhere()
+            self.restart()
+        elif way == 'drop':
+            self.ax = self.somewhere()
+            self.fall_from(self.top - 10 * s)  # his feet start just above the top of the screen
+        elif way == 'peek':
+            self.peek(side, walk_out=False)
+        else:
+            self.facing = -side
+            self.ax = edge + side * 12 * s
+            self.walk_to(self.somewhere(), limit=False)
+        user32.ShowWindow(self.hwnd, SW_SHOWNOACTIVATE)
+        self.plan_visit()
+
+    # ---------- talking ----------
+
+    def plan_talk(self):
+        self.cancel('talk')
+        if self.talk:
+            self.later('talk', random.uniform(0.5, 1.5) * self.talk * 1000, self.chatter)
+
+    def chatter(self):
+        if self.mode == 'act' and not self.bubble.visible:
+            self.say('random')
+        self.plan_talk()
+
+    def phrase(self, kind):
+        """A random phrase of that kind from frases.md, read again whenever the file changes."""
+        try:
+            t = PHRASES.stat().st_mtime
+        except OSError:
+            t = None
+        if t != self.phrases_time:
+            self.phrases, self.phrases_time = read_phrases(), t
+        pool = self.phrases.get(kind)
+        return random.choice(pool) if pool else None
+
+    def say(self, kind):
+        """A speech bubble over his head for a few seconds, longer for longer phrases."""
+        text = self.phrase(kind)
+        if not text:
+            return
+        self.bubble.draw(text, self.scale)
+        self.follow()
+        self.bubble.show()
+        self.later('bubble', min(9000, 2500 + 70 * len(text)), self.bubble.hide)
+
+    def follow(self):
+        """Keep the bubble over his head (as he stands, so it doesn't bob when he hops)."""
+        self.bubble.move(self.ax, self.ay - 25 * self.scale, self.left, self.right)
 
     # ---------- clicks and dragging ----------
 
@@ -549,22 +801,33 @@ class Pet:
             self.click()
 
     def click(self):
-        """1 click hops, 2 or 3 double-jump, the 4th in a fast burst annoys him."""
-        self.clicks += 1
-        if self.clicks >= 4:
+        """1 tap hops and 2 double-jump. 3 taps within a few seconds tickle him, and the 6th makes him angry."""
+        if self.anim['id'] == 'angry':
+            return  # let him finish being angry
+        now = time.monotonic()
+        self.taps = [t for t in self.taps if now - t < TAP_MEMORY] + [now]
+        if len(self.taps) >= 6:
             self.cancel('clicks')
-            self.clicks = 0
-            return self.react('annoyed')
+            self.clicks, self.taps = 0, []
+            self.react('angry')
+            return self.say('angry')
+        self.clicks += 1
         self.later('clicks', CLICK_GAP, self.clicked)
 
     def clicked(self):
         n, self.clicks = self.clicks, 0
+        if len(self.taps) >= 3:
+            self.react('giggle')
+            if not self.bubble.visible:
+                self.say('happy')
+            return
         self.react('hop' if n == 1 else 'doubleJump')
 
     def start_drag(self):
         self.cancel('clicks')
         self.clicks = 0
         self.mode = 'drag'
+        self.bubble.hide()
         self.play('dangle', until=lambda: False)
 
     def hold(self, mx, my):
@@ -572,6 +835,7 @@ class Pet:
         side = 1 if self.facing > 0 else 2
         x, y, w, h, _ = max(self.anims['dangle']['frames'][0][side], key=lambda r: r[1] + r[3])
         self.ax, self.ay = mx - x * self.scale, my + (y + h) * self.scale
+        self.left, self.top, self.right, self.ground = screen_at(mx, my)  # he can be carried to another screen
         self.place()
 
     def drop(self):
@@ -583,8 +847,12 @@ class Pet:
         if feet >= self.ground:
             self.ay = self.ground
             return self.react('land')
+        self.fall_from(feet)
+
+    def fall_from(self, feet):
+        self.mode = 'fall'
         self.play('falling', until=lambda: False)
-        self.ay, self.vy = feet + 20 * s, 0.0  # the falling pose is drawn 20 units up
+        self.ay, self.vy = feet + 20 * self.scale, 0.0  # the falling pose is drawn 20 units up
         self.place()
         self.later('fall', 16, self.fall)
 
@@ -628,10 +896,16 @@ class Pet:
         for name in ('frame', 'move', 'fall', 'clicks'):
             self.cancel(name)
         self.press, self.clicks = None, 0
-        self.root.withdraw()
+        self.bubble.hide()
+        user32.ShowWindow(self.hwnd, SW_HIDE)
 
     def resume(self):
-        self.root.deiconify()
+        if self.away:
+            if not self.appear:  # set to "Always here" during the full-screen app
+                return self.arrive()
+            self.mode = 'away'
+            return
+        user32.ShowWindow(self.hwnd, SW_SHOWNOACTIVATE)
         self.restart()
 
     def restart(self):
@@ -639,6 +913,8 @@ class Pet:
         for name in ('frame', 'move', 'fall', 'clicks'):
             self.cancel(name)
         self.press, self.clicks = None, 0
+        if self.away:
+            return
         s = self.scale
         self.ax = min(max(self.ax, self.left + 10 * s), self.right - 10 * s)
         self.ay = self.ground
@@ -658,6 +934,9 @@ class Pet:
         popup_menu(self.tray.hwnd, [
             ('Size', [(f'{k}×', k == self.size, lambda k=k: self.set_size(k)) for k in SIZES]),
             ('Shirt colour', [(name, c == shirt, lambda c=c: self.set_shirt(c)) for name, c in SHIRTS]),
+            ('Talk', [(name, v == self.talk, lambda v=v: self.set_talk(v)) for name, v in TALK]),
+            ('Appear', [(name, v == self.appear, lambda v=v: self.set_appear(v)) for name, v in APPEAR]),
+            ('Come here now', False, self.call) if self.away else ('Say something', False, lambda: self.say('random')),
             ('Pause', self.held, self.toggle_pause),
             ('Start with Windows', starts_with_windows(), lambda: set_start_with_windows(not starts_with_windows())),
             None,
@@ -665,7 +944,8 @@ class Pet:
         ], x, y)
 
     def set_size(self, k):
-        self.size, self.scale = k, self.base * k
+        self.size, self.scale = k, max(1, round(self.base * k))
+        self.bubble.hide()
         self.save()
         if self.mode != 'paused':
             self.restart()
@@ -681,13 +961,33 @@ class Pet:
             if self.held:
                 self.cancel('frame')
 
+    def set_talk(self, v):
+        self.talk = v
+        self.save()
+        self.plan_talk()
+
+    def set_appear(self, v):
+        self.appear = v
+        self.save()
+        if self.leave_due == 'away':
+            self.leave_due = None
+        if self.away and not v and self.mode != 'paused':
+            return self.arrive()
+        self.plan_visit()
+
+    def call(self):
+        if self.away and self.mode != 'paused':
+            self.cancel('visit')
+            self.arrive()
+
     def toggle_pause(self):
         self.held = not self.held
         if self.mode != 'paused':
             self.restart()
 
     def save(self):
-        save_settings({'size': self.size, 'shirt': self.colors[self.keys.index('o')]})
+        save_settings({'size': self.size, 'shirt': self.colors[self.keys.index('o')],
+                       'talk': self.talk, 'appear': self.appear})
 
     def icon(self):
         return make_icon(self.anims['idle']['frames'][0][1], self.colors)
@@ -717,6 +1017,8 @@ def main(args):
     size = settings.get('size') if settings.get('size') in SIZES else 1
     if isinstance(settings.get('shirt'), str) and len(settings['shirt']) == 7:
         colors[keys.index('o')] = settings['shirt']
+    talk = settings.get('talk') if settings.get('talk') in dict(TALK).values() else 300
+    appear = settings.get('appear') if settings.get('appear') in dict(APPEAR).values() else 0
     sleep_after = SLEEP_AFTER
     if '--sleep-after' in args:
         i = args.index('--sleep-after')
@@ -728,7 +1030,7 @@ def main(args):
             sys.exit(f'Unknown animation: {a}')
     dpi = user32.GetDpiForSystem() if hasattr(user32, 'GetDpiForSystem') else 96
     scale = max(1, round(4 * dpi / 96))  # 4 screen pixels per unit at 100 %, always a whole number
-    pet = Pet((keys, colors), anims, scale, only or None, sleep_after, size)
+    pet = Pet((keys, colors), anims, scale, only or None, sleep_after, size, talk, appear)
     pet.tray = Tray('Carles', pet.icon(), lambda x, y: pet.root.after(1, lambda: pet.show_menu(x, y)))
     try:
         pet.root.mainloop()
